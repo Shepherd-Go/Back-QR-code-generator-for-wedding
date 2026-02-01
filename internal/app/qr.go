@@ -6,117 +6,96 @@ import (
 	"fmt"
 	"image/color"
 	"image/png"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/andresxlp/qr-system/config"
 	"github.com/andresxlp/qr-system/internal/domain/dto"
 	"github.com/andresxlp/qr-system/internal/domain/entity"
 	"github.com/andresxlp/qr-system/internal/domain/ports/repo"
 	"github.com/andresxlp/qr-system/internal/infra/adapters/mongo/models"
 	"github.com/fogleman/gg"
+	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
-	uuid "github.com/satori/go.uuid"
 	"github.com/skip2/go-qrcode"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-type QR interface {
-	GenerateQRCodes(ctx context.Context, request dto.CreateQrRequest)
-	DownloadQRCode(ctx context.Context, downloadCode dto.QrRequestCommon) ([]byte, error)
-	ValidateQRCode(ctx context.Context, requestQr dto.QrRequestCommon) error
-	CountQRCodeUsed(ctx context.Context, emailOwner string) (int64, error)
+type Invitation interface {
+	GenerateInvitation(ctx context.Context, guest dto.Guest)
+	ValidateQRCode(ctx context.Context, id primitive.ObjectID) (dto.Guest, error)
+	ConfirmInvitation(ctx context.Context, id primitive.ObjectID) error
 }
 type qr struct {
 	mongo repo.QR
 }
 
-func NewQr(mongo repo.QR) QR {
+func NewQr(mongo repo.QR) Invitation {
 	return &qr{
 		mongo,
 	}
 }
 
-func (q *qr) GenerateQRCodes(ctx context.Context, request dto.CreateQrRequest) {
-	for i := 0; i < request.TotalQR; i++ {
-		id := uuid.NewV4()
-		code := fmt.Sprintf("%s", id)
-
-		qrImg := q.createQrCode(code)
-
-		q.createTicketWithQR(qrImg, request.Zone, i)
-
-		qrData := models.Qr{
-			Serial: code,
-			Status: "Created",
-			//ImgBytes:  q.createQrCode(code),
-			CreatedBy: request.Email,
-			CreatedAt: time.Now().Local(),
-		}
-
-		if err := q.mongo.Create(ctx, qrData); err != nil {
-			log.Error(err)
-		}
-
+func (q *qr) saveGuest(ctx context.Context, guest dto.Guest) string {
+	qrData := models.Guest{
+		N_Table:    guest.N_Table,
+		N_Seat:     guest.N_Seat,
+		Guest_Name: guest.Guest_Name,
+		Rol:        guest.Rol,
+		Lottery:    guest.Lottery,
+		Status:     "Created",
 	}
+
+	id, err := q.mongo.Create(ctx, qrData)
+	if err != nil {
+		log.Error(err)
+		return ""
+	}
+	return id
 }
 
 func (q *qr) createQrCode(code string) entity.QrImage {
-	qrCode := fmt.Sprintf("%s/validate/%s", config.Environments().InternalPrivatePath, code)
-
-	qrByte, err := qrcode.Encode(qrCode, qrcode.Medium, 235)
+	QRCode, err := qrcode.New(code, qrcode.Medium)
 	if err != nil {
 		log.Error(err)
 	}
 
-	qrImg := entity.QrImage{
-		Serial:   code,
-		PathName: fmt.Sprintf("tmp/qr-code-%s.png", code),
-	}
+	QRCode.DisableBorder = true
 
-	img, err := png.Decode(bytes.NewBuffer(qrByte))
-	if err != nil {
-		log.Errorf("an error occurred when try decode img: %v", err)
+	return entity.QrImage{
+		Serial:  code,
+		ImgFile: QRCode.Image(350),
 	}
-
-	file, err := os.Create(qrImg.PathName)
-	if err != nil {
-		log.Errorf("an error occurred when try create file: %v", err)
-	}
-	defer file.Close()
-
-	if err = png.Encode(file, img); err != nil {
-		log.Errorf("an error occurred when try Encode file: %v", err)
-	}
-
-	qrImg.ImgFile, err = gg.LoadPNG(qrImg.PathName)
-	if err != nil {
-		log.Errorf("an error occurred when try load qr img", err)
-	}
-
-	return qrImg
 }
 
-func (q *qr) createTicketWithQR(qrImg entity.QrImage, zone string, i int) {
-	imgTicket, err := gg.LoadPNG("tmp/ticket.png")
+func (q *qr) GenerateInvitation(ctx context.Context, guest dto.Guest) {
+
+	id := q.saveGuest(ctx, guest)
+
+	qrImg := q.createQrCode(id)
+
+	imgTicket, err := gg.LoadPNG("tmp/invitation_base.png")
 	if err != nil {
 		log.Error(err)
+		return
 	}
 
 	dc := gg.NewContextForImage(imgTicket)
 	dc.Clear()
-	dc.SetColor(color.Black)
+	dc.SetColor(color.RGBA{
+		R: 203,
+		G: 167,
+		B: 122,
+		A: 255,
+	})
 	dc.DrawImage(imgTicket, 0, 0)
 
-	if err = dc.LoadFontFace("tmp/fonts/impact.ttf", 48); err != nil {
+	if err = dc.LoadFontFace("tmp/fonts/higuen_serif.ttf", 55); err != nil {
 		panic(err)
 	}
-	dc.DrawImage(qrImg.ImgFile, 75, 550)
-	dc.DrawString(strings.ToUpper(zone), 75, 830)
-	if err = dc.LoadFontFace("tmp/fonts/impact.ttf", 24); err != nil {
-		panic(err)
-	}
-	dc.DrawString(fmt.Sprintf("N° %04d", i+1), 75, 870)
+	dc.DrawImage(qrImg.ImgFile, 445, 1079)
+	dc.DrawStringWrapped(strings.ToUpper(guest.Guest_Name), 220, 1620, 0, 0, 800, 1, 1)
 	dc.Clip()
 
 	ticketWithQR := dc.Image()
@@ -127,35 +106,46 @@ func (q *qr) createTicketWithQR(qrImg entity.QrImage, zone string, i int) {
 		log.Error(err)
 	}
 
-	if err = os.WriteFile(fmt.Sprintf("tmp/tickets/ticket-%s.png", qrImg.Serial), buff.Bytes(), 0644); err != nil {
+	invitationPath := "tmp/invitations/"
+	dir := filepath.Dir(invitationPath)
+	log.Infof("Directorio: %s", dir)
+	if _, err = os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, os.ModePerm)
+		if err != nil {
+			log.Fatalf("an error occurred when trying to create directory: %v", err)
+		}
+	}
+
+	if err = os.WriteFile(fmt.Sprintf("%s%s.png", invitationPath, strings.Replace(guest.Guest_Name, " ", "-", -1)), buff.Bytes(), 0644); err != nil {
 		log.Error(err)
 	}
 
-	os.Remove(qrImg.PathName)
 }
 
-func (q *qr) DownloadQRCode(ctx context.Context, downloadCode dto.QrRequestCommon) ([]byte, error) {
-	qrDB, err := q.mongo.GetQrCode(ctx, models.Qr{Serial: downloadCode.Serial /*, Pin: downloadCode.Pin*/})
+func (q *qr) ValidateQRCode(ctx context.Context, id primitive.ObjectID) (dto.Guest, error) {
+	infoGuest, err := q.mongo.ValidateQrCode(ctx, id)
 	if err != nil {
-		return nil, err
+		if err.Error() == "this qr-code not exist" {
+			return dto.Guest{}, echo.NewHTTPError(http.StatusNotFound, entity.Error{Message: "this qr-code not exist"})
+		}
+		log.Errorf(err.Error())
+		return dto.Guest{}, echo.NewHTTPError(http.StatusInternalServerError, entity.Error{Message: "an internal error has occurred"})
 	}
 
-	return qrDB.ImgBytes, nil
+	return infoGuest, nil
 }
 
-func (q *qr) ValidateQRCode(ctx context.Context, requestQr dto.QrRequestCommon) error {
-	err := q.mongo.ValidateQrCode(ctx, models.Qr{Serial: requestQr.Serial /*, Pin: requestQr.Pin*/})
+func (q *qr) ConfirmInvitation(ctx context.Context, id primitive.ObjectID) error {
+
+	_, err := q.ValidateQRCode(ctx, id)
 	if err != nil {
 		return err
 	}
-	return err
-}
 
-func (q *qr) CountQRCodeUsed(ctx context.Context, emailOwner string) (int64, error) {
-	totalQRUsed, err := q.mongo.CountQRCodeUsed(ctx, emailOwner)
-	if err != nil {
-		return 0, err
+	if err = q.mongo.ConfirmInvitation(ctx, id); err != nil {
+		log.Errorf(err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, entity.Error{Message: "an internal error has occurred"})
 	}
 
-	return totalQRUsed, err
+	return nil
 }

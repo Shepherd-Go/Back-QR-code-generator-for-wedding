@@ -28,14 +28,14 @@ func ConnInstance() models.DBClientWrite {
 }
 
 func getConnection() models.DBClientWrite {
-	return models.DBClientWrite{Client: generateClient()}
+	return models.DBClientWrite{Database: generateClient()}
 }
 
-func generateClient() *mongo.Client {
+func generateClient() *mongo.Database {
 	ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctxTimeout, options.Client().ApplyURI(config.Environments().MongoDBConnectionWrite))
+	client, err := mongo.Connect(ctxTimeout, options.Client().ApplyURI(config.Environments().Databse.MongoDBConnectionWrite))
 	if err != nil {
 		panic(fmt.Sprintf("mongoDB error in client configuration: %s", err.Error()))
 	}
@@ -44,9 +44,7 @@ func generateClient() *mongo.Client {
 		panic(fmt.Sprintf("mongoDB error in client connection: %s", err.Error()))
 	}
 
-	client.Database("qr-code")
-
 	log.Info("Database Write Connection Successfully")
 
-	return client
+	return client.Database("nl-wedding")
 }
